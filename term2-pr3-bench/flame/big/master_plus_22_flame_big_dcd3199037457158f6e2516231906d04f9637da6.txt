@@ -1,0 +1,12 @@
+random-seed=1984548367
+enable-cache=1
+Running test with config: {partitions=10000, concurrency=100, mode=read, frontend=cql, query_single_key=no, counters=no}
+Creating 10000 partitions...
+181349.49 tps ( 75.0 allocs/op,  12.1 tasks/op,   49136 insns/op)
+
+median 181349.49 tps ( 75.0 allocs/op,  12.1 tasks/op,   49136 insns/op)
+median absolute deviation: 0.00
+maximum: 181349.49
+minimum: 181349.49
+
+Total time: 553.44s
