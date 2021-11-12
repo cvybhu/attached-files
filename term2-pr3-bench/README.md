@@ -16,9 +16,24 @@ Perf files are also available, but they take up 4.7GB of space so I didn't uploa
 build/release/test/perf/perf_simple_query --cpuset 1 -m 1G --operations-per-shard {workload} --task-quota-ms 10
 ```
 
-## Graphs (generated from bench/big)
-![](tps.png)
-![](instructions.png)
-![](allocations.png)
-![](tasks.png)
+## Graphs
 
+### Big
+![](graphs/big/tps.png)
+![](graphs/big/instructions.png)
+![](graps/big/allocations.png)
+![](graphs/big/tasks.png)
+
+### Medium
+
+![](graphs/medium/tps.png)
+![](graphs/medium/instructions.png)
+![](graps/medium/allocations.png)
+![](graphs/medium/tasks.png)
+
+### Small
+
+![](graphs/small/tps.png)
+![](graphs/small/instructions.png)
+![](graps/small/allocations.png)
+![](graphs/small/tasks.png)
