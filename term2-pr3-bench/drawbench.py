@@ -42,32 +42,38 @@ x = [i for i in range(len(tpss))]
 
 plt.plot(x, tpss, 'o--')
 plt.title('TPS')
-plt.xticks(x)
 plt.xlabel('master +')
 plt.ylabel('tps')
+
+for (x_coord, y) in zip(x, tpss):
+    plt.annotate(str(x_coord), (x_coord, y))
+
 plt.savefig(os.path.join(out_dir, 'tps.png'))
 plt.close()
 
 plt.plot(x, instructionss, 'o--')
 plt.title('Instructions')
-plt.xticks(x)
 plt.xlabel('master +')
 plt.ylabel('instructions')
+for (x_coord, y) in zip(x, instructionss):
+    plt.annotate(str(x_coord), (x_coord, y))
 plt.savefig(os.path.join(out_dir, 'instructions.png'))
 plt.close()
 
 plt.plot(x, taskss, 'o--')
 plt.title('Tasks')
-plt.xticks(x)
 plt.xlabel('master +')
 plt.ylabel('tasks')
+for (x_coord, y) in zip(x, taskss):
+    plt.annotate(str(x_coord), (x_coord, y))
 plt.savefig(os.path.join(out_dir, 'tasks.png'))
 plt.close()
 
 plt.plot(x, allocss, 'o--')
 plt.title("Allocations")
-plt.xticks(x)
 plt.xlabel('master +')
 plt.ylabel('allocations')
+for (x_coord, y) in zip(x, allocss):
+    plt.annotate(str(x_coord), (x_coord, y))
 plt.savefig(os.path.join(out_dir, 'allocations.png'))
 plt.close()
