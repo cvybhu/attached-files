@@ -17,19 +17,19 @@ build/release/test/perf/perf_simple_query --cpuset 1 -m 1G --operations-per-shar
 ### Big
 ![](graphs/big/tps.png)
 ![](graphs/big/instructions.png)
-![](graps/big/allocations.png)
+![](graphs/big/allocations.png)
 ![](graphs/big/tasks.png)
 
 ### Medium
 
 ![](graphs/medium/tps.png)
 ![](graphs/medium/instructions.png)
-![](graps/medium/allocations.png)
+![](graphs/medium/allocations.png)
 ![](graphs/medium/tasks.png)
 
 ### Small
 
 ![](graphs/small/tps.png)
 ![](graphs/small/instructions.png)
-![](graps/small/allocations.png)
+![](graphs/small/allocations.png)
 ![](graphs/small/tasks.png)
