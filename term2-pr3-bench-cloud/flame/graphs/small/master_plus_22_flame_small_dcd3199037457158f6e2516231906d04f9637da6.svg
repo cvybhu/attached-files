@@ -1,0 +1,2556 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="2070" onload="init(evt)" viewBox="0 0 1200 2070" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				clearzoom();
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="2070.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="2053" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="2053" > </text>
+<g id="frames">
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1861" width="15.9" height="15.0" fill="rgb(205,153,39)" rx="2" ry="2" />
+<text  x="1094.32" y="1871.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.3" y="1829" width="0.6" height="15.0" fill="rgb(211,117,15)" rx="2" ry="2" />
+<text  x="1092.25" y="1839.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (48 samples, 2.81%)</title><rect x="1039.6" y="1605" width="33.1" height="15.0" fill="rgb(232,212,18)" rx="2" ry="2" />
+<text  x="1042.57" y="1615.5" >[p..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (14 samples, 0.82%)</title><rect x="1169.3" y="213" width="9.7" height="15.0" fill="rgb(227,174,27)" rx="2" ry="2" />
+<text  x="1172.30" y="223.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1749" width="0.7" height="15.0" fill="rgb(213,197,51)" rx="2" ry="2" />
+<text  x="1087.42" y="1759.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1114.8" y="1717" width="2.7" height="15.0" fill="rgb(238,216,22)" rx="2" ry="2" />
+<text  x="1117.78" y="1727.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (22 samples, 1.29%)</title><rect x="1163.8" y="277" width="15.2" height="15.0" fill="rgb(222,222,11)" rx="2" ry="2" />
+<text  x="1166.78" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown] (79 samples, 4.62%)</title><rect x="1125.1" y="677" width="54.5" height="15.0" fill="rgb(254,159,30)" rx="2" ry="2" />
+<text  x="1128.13" y="687.5" >[unkn..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="357" width="2.7" height="15.0" fill="rgb(249,23,43)" rx="2" ry="2" />
+<text  x="1125.37" y="367.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="421" width="0.6" height="15.0" fill="rgb(248,31,38)" rx="2" ry="2" />
+<text  x="1181.96" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown] (1 samples, 0.06%)</title><rect x="1179.0" y="629" width="0.6" height="15.0" fill="rgb(213,2,46)" rx="2" ry="2" />
+<text  x="1181.96" y="639.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (11 samples, 0.64%)</title><rect x="1099.6" y="1541" width="7.6" height="15.0" fill="rgb(211,209,0)" rx="2" ry="2" />
+<text  x="1102.60" y="1551.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1285" width="60.7" height="15.0" fill="rgb(214,61,29)" rx="2" ry="2" />
+<text  x="1121.92" y="1295.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (11 samples, 0.64%)</title><rect x="1171.4" y="197" width="7.6" height="15.0" fill="rgb(235,56,8)" rx="2" ry="2" />
+<text  x="1174.37" y="207.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="917" width="60.7" height="15.0" fill="rgb(231,58,5)" rx="2" ry="2" />
+<text  x="1121.92" y="927.5" >[unkno..</text>
+</g>
+<g >
+<title>[libc-2.33.so] (2 samples, 0.12%)</title><rect x="623.5" y="1749" width="1.3" height="15.0" fill="rgb(232,146,53)" rx="2" ry="2" />
+<text  x="626.46" y="1759.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1061" width="60.7" height="15.0" fill="rgb(248,118,5)" rx="2" ry="2" />
+<text  x="1121.92" y="1071.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1861" width="0.7" height="15.0" fill="rgb(231,20,26)" rx="2" ry="2" />
+<text  x="1093.63" y="1871.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1685" width="15.9" height="15.0" fill="rgb(210,157,10)" rx="2" ry="2" />
+<text  x="1094.32" y="1695.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1733" width="0.7" height="15.0" fill="rgb(213,174,30)" rx="2" ry="2" />
+<text  x="1087.42" y="1743.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1413" width="0.7" height="15.0" fill="rgb(213,202,29)" rx="2" ry="2" />
+<text  x="1121.23" y="1423.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1781" width="61.4" height="15.0" fill="rgb(245,89,31)" rx="2" ry="2" />
+<text  x="1121.23" y="1791.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (86 samples, 5.03%)</title><rect x="1120.3" y="837" width="59.3" height="15.0" fill="rgb(241,217,24)" rx="2" ry="2" />
+<text  x="1123.30" y="847.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (654 samples, 38.25%)</title><rect x="624.8" y="1749" width="451.3" height="15.0" fill="rgb(206,145,26)" rx="2" ry="2" />
+<text  x="627.84" y="1759.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f963..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (36 samples, 2.11%)</title><rect x="1154.1" y="309" width="24.9" height="15.0" fill="rgb(227,2,9)" rx="2" ry="2" />
+<text  x="1157.12" y="319.5" >[..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="373" width="0.6" height="15.0" fill="rgb(252,53,23)" rx="2" ry="2" />
+<text  x="1181.96" y="383.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1781" width="0.7" height="15.0" fill="rgb(222,35,30)" rx="2" ry="2" />
+<text  x="1087.42" y="1791.5" ></text>
+</g>
+<g >
+<title>[unknown] (86 samples, 5.03%)</title><rect x="1120.3" y="789" width="59.3" height="15.0" fill="rgb(216,28,37)" rx="2" ry="2" />
+<text  x="1123.30" y="799.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="517" width="2.8" height="15.0" fill="rgb(244,108,21)" rx="2" ry="2" />
+<text  x="1136.42" y="527.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="885" width="60.7" height="15.0" fill="rgb(239,121,2)" rx="2" ry="2" />
+<text  x="1121.92" y="895.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1123.1" y="261" width="2.0" height="15.0" fill="rgb(223,95,18)" rx="2" ry="2" />
+<text  x="1126.06" y="271.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1121.7" y="421" width="0.7" height="15.0" fill="rgb(222,75,34)" rx="2" ry="2" />
+<text  x="1124.68" y="431.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1083.7" y="1877" width="0.7" height="15.0" fill="rgb(205,53,3)" rx="2" ry="2" />
+<text  x="1086.73" y="1887.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="453" width="2.7" height="15.0" fill="rgb(232,37,50)" rx="2" ry="2" />
+<text  x="1125.37" y="463.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="597" width="2.8" height="15.0" fill="rgb(249,106,6)" rx="2" ry="2" />
+<text  x="1136.42" y="607.5" ></text>
+</g>
+<g >
+<title>[unknown] (86 samples, 5.03%)</title><rect x="1120.3" y="725" width="59.3" height="15.0" fill="rgb(226,173,27)" rx="2" ry="2" />
+<text  x="1123.30" y="735.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1083.7" y="1909" width="0.7" height="15.0" fill="rgb(253,166,10)" rx="2" ry="2" />
+<text  x="1086.73" y="1919.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1083.7" y="1893" width="0.7" height="15.0" fill="rgb(216,189,24)" rx="2" ry="2" />
+<text  x="1086.73" y="1903.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1669" width="61.4" height="15.0" fill="rgb(242,220,9)" rx="2" ry="2" />
+<text  x="1121.23" y="1679.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="389" width="2.8" height="15.0" fill="rgb(253,140,49)" rx="2" ry="2" />
+<text  x="1136.42" y="399.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="533" width="2.8" height="15.0" fill="rgb(247,182,9)" rx="2" ry="2" />
+<text  x="1136.42" y="543.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1797" width="0.7" height="15.0" fill="rgb(252,105,9)" rx="2" ry="2" />
+<text  x="1092.94" y="1807.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1132.0" y="373" width="1.4" height="15.0" fill="rgb(216,33,0)" rx="2" ry="2" />
+<text  x="1135.04" y="383.5" ></text>
+</g>
+<g >
+<title>__dynamic_cast (2 samples, 0.12%)</title><rect x="1080.3" y="1781" width="1.4" height="15.0" fill="rgb(250,164,25)" rx="2" ry="2" />
+<text  x="1083.28" y="1791.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="1179.0" y="613" width="0.6" height="15.0" fill="rgb(218,144,12)" rx="2" ry="2" />
+<text  x="1181.96" y="623.5" ></text>
+</g>
+<g >
+<title>std::_Hash_bytes (4 samples, 0.23%)</title><rect x="1072.7" y="1701" width="2.8" height="15.0" fill="rgb(245,152,19)" rx="2" ry="2" />
+<text  x="1075.69" y="1711.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1029" width="60.7" height="15.0" fill="rgb(224,96,8)" rx="2" ry="2" />
+<text  x="1121.92" y="1039.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="597" width="2.7" height="15.0" fill="rgb(205,157,32)" rx="2" ry="2" />
+<text  x="1125.37" y="607.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1637" width="0.7" height="15.0" fill="rgb(212,24,14)" rx="2" ry="2" />
+<text  x="1087.42" y="1647.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="629" width="2.1" height="15.0" fill="rgb(236,36,5)" rx="2" ry="2" />
+<text  x="1123.30" y="639.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (2 samples, 0.12%)</title><rect x="428.2" y="1797" width="1.4" height="15.0" fill="rgb(224,72,27)" rx="2" ry="2" />
+<text  x="431.18" y="1807.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1797" width="0.7" height="15.0" fill="rgb(249,129,21)" rx="2" ry="2" />
+<text  x="1087.42" y="1807.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.3" y="1813" width="0.6" height="15.0" fill="rgb(248,206,9)" rx="2" ry="2" />
+<text  x="1092.25" y="1823.5" ></text>
+</g>
+<g >
+<title>std::_Hash_bytes (2 samples, 0.12%)</title><rect x="1078.9" y="1765" width="1.4" height="15.0" fill="rgb(225,63,19)" rx="2" ry="2" />
+<text  x="1081.90" y="1775.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1461" width="60.7" height="15.0" fill="rgb(229,53,4)" rx="2" ry="2" />
+<text  x="1121.92" y="1471.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1365" width="0.7" height="15.0" fill="rgb(218,167,1)" rx="2" ry="2" />
+<text  x="1121.23" y="1375.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1813" width="0.7" height="15.0" fill="rgb(208,73,13)" rx="2" ry="2" />
+<text  x="1093.63" y="1823.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1797" width="15.9" height="15.0" fill="rgb(244,71,48)" rx="2" ry="2" />
+<text  x="1094.32" y="1807.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (131 samples, 7.66%)</title><rect x="982.3" y="1637" width="90.4" height="15.0" fill="rgb(249,124,1)" rx="2" ry="2" />
+<text  x="985.29" y="1647.5" >[perf_simp..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1,249 samples, 73.04%)</title><rect x="221.2" y="1861" width="861.8" height="15.0" fill="rgb(241,194,16)" rx="2" ry="2" />
+<text  x="224.16" y="1871.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1121.7" y="405" width="0.7" height="15.0" fill="rgb(217,228,16)" rx="2" ry="2" />
+<text  x="1124.68" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1701" width="61.4" height="15.0" fill="rgb(205,59,53)" rx="2" ry="2" />
+<text  x="1121.23" y="1711.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1557" width="60.7" height="15.0" fill="rgb(229,111,37)" rx="2" ry="2" />
+<text  x="1121.92" y="1567.5" >[unkno..</text>
+</g>
+<g >
+<title>[libc-2.33.so] (2 samples, 0.12%)</title><rect x="382.6" y="1813" width="1.4" height="15.0" fill="rgb(237,47,6)" rx="2" ry="2" />
+<text  x="385.63" y="1823.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="629" width="2.8" height="15.0" fill="rgb(218,169,20)" rx="2" ry="2" />
+<text  x="1136.42" y="639.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1893" width="0.7" height="15.0" fill="rgb(233,62,0)" rx="2" ry="2" />
+<text  x="1093.63" y="1903.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="533" width="2.7" height="15.0" fill="rgb(248,4,35)" rx="2" ry="2" />
+<text  x="1125.37" y="543.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="677" width="2.1" height="15.0" fill="rgb(214,116,48)" rx="2" ry="2" />
+<text  x="1123.30" y="687.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="1187.2" y="1925" width="0.7" height="15.0" fill="rgb(226,138,43)" rx="2" ry="2" />
+<text  x="1190.24" y="1935.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1317" width="60.7" height="15.0" fill="rgb(211,104,8)" rx="2" ry="2" />
+<text  x="1121.92" y="1327.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1829" width="0.7" height="15.0" fill="rgb(217,184,49)" rx="2" ry="2" />
+<text  x="1092.94" y="1839.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1573" width="0.7" height="15.0" fill="rgb(242,54,5)" rx="2" ry="2" />
+<text  x="1087.42" y="1583.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="613" width="2.7" height="15.0" fill="rgb(246,47,48)" rx="2" ry="2" />
+<text  x="1125.37" y="623.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1,269 samples, 74.21%)</title><rect x="208.0" y="1877" width="875.7" height="15.0" fill="rgb(221,103,2)" rx="2" ry="2" />
+<text  x="211.05" y="1887.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1781" width="0.7" height="15.0" fill="rgb(249,134,13)" rx="2" ry="2" />
+<text  x="1092.94" y="1791.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1269" width="60.7" height="15.0" fill="rgb(218,208,13)" rx="2" ry="2" />
+<text  x="1121.92" y="1279.5" >[unkno..</text>
+</g>
+<g >
+<title>fmt::v7::detail::parse_replacement_field&lt;char, fmt::v7::detail::format_handler&lt;fmt::v7::detail::buffer_appender&lt;char&gt;, char, fmt::v7::basic_format_context&lt;fmt::v7::detail::buffer_appender&lt;char&gt;, char&gt; &gt;&amp;&gt; (1 samples, 0.06%)</title><rect x="1179.6" y="1957" width="0.7" height="15.0" fill="rgb(253,103,19)" rx="2" ry="2" />
+<text  x="1182.65" y="1967.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1333" width="0.7" height="15.0" fill="rgb(222,127,7)" rx="2" ry="2" />
+<text  x="1121.23" y="1343.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (61 samples, 3.57%)</title><rect x="1136.9" y="517" width="42.1" height="15.0" fill="rgb(238,126,16)" rx="2" ry="2" />
+<text  x="1139.87" y="527.5" >[pe..</text>
+</g>
+<g >
+<title>[unknown] (86 samples, 5.03%)</title><rect x="1120.3" y="805" width="59.3" height="15.0" fill="rgb(225,94,17)" rx="2" ry="2" />
+<text  x="1123.30" y="815.5" >[unkno..</text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="1153.4" y="309" width="0.7" height="15.0" fill="rgb(234,35,54)" rx="2" ry="2" />
+<text  x="1156.43" y="319.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1813" width="61.4" height="15.0" fill="rgb(205,46,29)" rx="2" ry="2" />
+<text  x="1121.23" y="1823.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1178.3" y="85" width="0.7" height="15.0" fill="rgb(210,78,37)" rx="2" ry="2" />
+<text  x="1181.27" y="95.5" ></text>
+</g>
+<g >
+<title>[libpthread-2.33.so] (1 samples, 0.06%)</title><rect x="1083.7" y="1989" width="0.7" height="15.0" fill="rgb(221,216,49)" rx="2" ry="2" />
+<text  x="1086.73" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (63 samples, 3.68%)</title><rect x="1136.2" y="645" width="43.4" height="15.0" fill="rgb(235,4,24)" rx="2" ry="2" />
+<text  x="1139.18" y="655.5" >[unk..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1829" width="0.7" height="15.0" fill="rgb(232,141,23)" rx="2" ry="2" />
+<text  x="1087.42" y="1839.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (40 samples, 2.34%)</title><rect x="1151.4" y="325" width="27.6" height="15.0" fill="rgb(236,12,27)" rx="2" ry="2" />
+<text  x="1154.36" y="335.5" >[..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="613" width="2.8" height="15.0" fill="rgb(236,108,51)" rx="2" ry="2" />
+<text  x="1136.42" y="623.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="357" width="0.6" height="15.0" fill="rgb(205,108,31)" rx="2" ry="2" />
+<text  x="1181.96" y="367.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="725" width="1.4" height="15.0" fill="rgb(225,165,12)" rx="2" ry="2" />
+<text  x="1121.92" y="735.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="405" width="0.6" height="15.0" fill="rgb(254,112,20)" rx="2" ry="2" />
+<text  x="1181.96" y="415.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1957" width="0.7" height="15.0" fill="rgb(232,118,27)" rx="2" ry="2" />
+<text  x="1093.63" y="1967.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (56 samples, 3.27%)</title><rect x="1140.3" y="373" width="38.7" height="15.0" fill="rgb(207,46,21)" rx="2" ry="2" />
+<text  x="1143.32" y="383.5" >[pe..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="597" width="0.6" height="15.0" fill="rgb(239,210,17)" rx="2" ry="2" />
+<text  x="1181.96" y="607.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1461" width="0.7" height="15.0" fill="rgb(227,59,37)" rx="2" ry="2" />
+<text  x="1121.23" y="1471.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (14 samples, 0.82%)</title><rect x="1169.3" y="229" width="9.7" height="15.0" fill="rgb(245,176,50)" rx="2" ry="2" />
+<text  x="1172.30" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1189" width="60.7" height="15.0" fill="rgb(231,6,44)" rx="2" ry="2" />
+<text  x="1121.92" y="1199.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="677" width="1.4" height="15.0" fill="rgb(212,21,19)" rx="2" ry="2" />
+<text  x="1121.92" y="687.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1893" width="15.9" height="15.0" fill="rgb(232,53,31)" rx="2" ry="2" />
+<text  x="1094.32" y="1903.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1135.5" y="149" width="0.7" height="15.0" fill="rgb(214,29,30)" rx="2" ry="2" />
+<text  x="1138.49" y="159.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1132.7" y="309" width="0.7" height="15.0" fill="rgb(243,21,42)" rx="2" ry="2" />
+<text  x="1135.73" y="319.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1106.5" y="1365" width="0.7" height="15.0" fill="rgb(254,145,17)" rx="2" ry="2" />
+<text  x="1109.50" y="1375.5" ></text>
+</g>
+<g >
+<title>[libpthread-2.33.so] (1 samples, 0.06%)</title><rect x="1179.6" y="1941" width="0.7" height="15.0" fill="rgb(252,30,47)" rx="2" ry="2" />
+<text  x="1182.65" y="1951.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1589" width="0.7" height="15.0" fill="rgb(253,89,51)" rx="2" ry="2" />
+<text  x="1087.42" y="1599.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (19 samples, 1.11%)</title><rect x="1094.1" y="1621" width="13.1" height="15.0" fill="rgb(246,129,32)" rx="2" ry="2" />
+<text  x="1097.08" y="1631.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (3 samples, 0.18%)</title><rect x="1120.3" y="709" width="2.1" height="15.0" fill="rgb(235,211,28)" rx="2" ry="2" />
+<text  x="1123.30" y="719.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1106.5" y="1333" width="0.7" height="15.0" fill="rgb(219,80,5)" rx="2" ry="2" />
+<text  x="1109.50" y="1343.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (62 samples, 3.63%)</title><rect x="1136.2" y="533" width="42.8" height="15.0" fill="rgb(227,172,6)" rx="2" ry="2" />
+<text  x="1139.18" y="543.5" >[per..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1365" width="60.7" height="15.0" fill="rgb(211,227,27)" rx="2" ry="2" />
+<text  x="1121.92" y="1375.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="693" width="1.4" height="15.0" fill="rgb(226,27,47)" rx="2" ry="2" />
+<text  x="1121.92" y="703.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="741" width="1.4" height="15.0" fill="rgb(206,32,40)" rx="2" ry="2" />
+<text  x="1121.92" y="751.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1269" width="0.7" height="15.0" fill="rgb(226,199,12)" rx="2" ry="2" />
+<text  x="1121.23" y="1279.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="501" width="2.8" height="15.0" fill="rgb(244,187,4)" rx="2" ry="2" />
+<text  x="1136.42" y="511.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (6 samples, 0.35%)</title><rect x="1085.8" y="1957" width="4.1" height="15.0" fill="rgb(226,88,44)" rx="2" ry="2" />
+<text  x="1088.80" y="1967.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1877" width="0.7" height="15.0" fill="rgb(244,43,36)" rx="2" ry="2" />
+<text  x="1092.94" y="1887.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1173" width="0.7" height="15.0" fill="rgb(252,83,2)" rx="2" ry="2" />
+<text  x="1121.23" y="1183.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (62 samples, 3.63%)</title><rect x="1136.2" y="613" width="42.8" height="15.0" fill="rgb(206,57,10)" rx="2" ry="2" />
+<text  x="1139.18" y="623.5" >[per..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1125.1" y="613" width="8.3" height="15.0" fill="rgb(245,220,40)" rx="2" ry="2" />
+<text  x="1128.13" y="623.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1119.6" y="613" width="0.7" height="15.0" fill="rgb(230,149,18)" rx="2" ry="2" />
+<text  x="1122.61" y="623.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="629" width="2.7" height="15.0" fill="rgb(227,10,28)" rx="2" ry="2" />
+<text  x="1125.37" y="639.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (11 samples, 0.64%)</title><rect x="1099.6" y="1525" width="7.6" height="15.0" fill="rgb(247,6,3)" rx="2" ry="2" />
+<text  x="1102.60" y="1535.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1123.1" y="341" width="2.0" height="15.0" fill="rgb(218,49,17)" rx="2" ry="2" />
+<text  x="1126.06" y="351.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (156 samples, 9.12%)</title><rect x="965.0" y="1653" width="107.7" height="15.0" fill="rgb(225,134,49)" rx="2" ry="2" />
+<text  x="968.04" y="1663.5" >[perf_simple_..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1104.4" y="1429" width="2.8" height="15.0" fill="rgb(252,156,48)" rx="2" ry="2" />
+<text  x="1107.43" y="1439.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1557" width="0.7" height="15.0" fill="rgb(240,5,11)" rx="2" ry="2" />
+<text  x="1087.42" y="1567.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1121.7" y="437" width="0.7" height="15.0" fill="rgb(217,68,25)" rx="2" ry="2" />
+<text  x="1124.68" y="447.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1989" width="0.7" height="15.0" fill="rgb(227,25,48)" rx="2" ry="2" />
+<text  x="1087.42" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1077" width="60.7" height="15.0" fill="rgb(243,102,33)" rx="2" ry="2" />
+<text  x="1121.92" y="1087.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (206 samples, 12.05%)</title><rect x="930.5" y="1669" width="142.2" height="15.0" fill="rgb(211,141,36)" rx="2" ry="2" />
+<text  x="933.54" y="1679.5" >[perf_simple_query..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1221" width="60.7" height="15.0" fill="rgb(205,122,39)" rx="2" ry="2" />
+<text  x="1121.92" y="1231.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1877" width="0.7" height="15.0" fill="rgb(239,59,18)" rx="2" ry="2" />
+<text  x="1093.63" y="1887.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1,269 samples, 74.21%)</title><rect x="208.0" y="1909" width="875.7" height="15.0" fill="rgb(212,101,29)" rx="2" ry="2" />
+<text  x="211.05" y="1919.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1134.8" y="245" width="1.4" height="15.0" fill="rgb(244,197,34)" rx="2" ry="2" />
+<text  x="1137.80" y="255.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1178.3" y="37" width="0.7" height="15.0" fill="rgb(241,146,22)" rx="2" ry="2" />
+<text  x="1181.27" y="47.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1119.6" y="597" width="0.7" height="15.0" fill="rgb(213,131,49)" rx="2" ry="2" />
+<text  x="1122.61" y="607.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1493" width="60.7" height="15.0" fill="rgb(206,188,7)" rx="2" ry="2" />
+<text  x="1121.92" y="1503.5" >[unkno..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_stringbuf&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_pbump (1 samples, 0.06%)</title><rect x="1187.9" y="1989" width="0.7" height="15.0" fill="rgb(249,94,20)" rx="2" ry="2" />
+<text  x="1190.93" y="1999.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1125.1" y="597" width="8.3" height="15.0" fill="rgb(211,63,45)" rx="2" ry="2" />
+<text  x="1128.13" y="607.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (317 samples, 18.54%)</title><rect x="853.9" y="1701" width="218.8" height="15.0" fill="rgb(207,213,39)" rx="2" ry="2" />
+<text  x="856.94" y="1711.5" >[perf_simple_query_flame_dcd..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="549" width="0.6" height="15.0" fill="rgb(254,94,35)" rx="2" ry="2" />
+<text  x="1181.96" y="559.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1132.7" y="357" width="0.7" height="15.0" fill="rgb(237,221,17)" rx="2" ry="2" />
+<text  x="1135.73" y="367.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1132.7" y="197" width="0.7" height="15.0" fill="rgb(210,181,5)" rx="2" ry="2" />
+<text  x="1135.73" y="207.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1845" width="0.7" height="15.0" fill="rgb(242,157,34)" rx="2" ry="2" />
+<text  x="1087.42" y="1855.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (8 samples, 0.47%)</title><rect x="1127.9" y="437" width="5.5" height="15.0" fill="rgb(210,4,24)" rx="2" ry="2" />
+<text  x="1130.89" y="447.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1098.9" y="1557" width="8.3" height="15.0" fill="rgb(239,12,50)" rx="2" ry="2" />
+<text  x="1101.91" y="1567.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1177.6" y="133" width="1.4" height="15.0" fill="rgb(228,203,8)" rx="2" ry="2" />
+<text  x="1180.58" y="143.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1123.1" y="293" width="2.0" height="15.0" fill="rgb(253,88,43)" rx="2" ry="2" />
+<text  x="1126.06" y="303.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="517" width="0.6" height="15.0" fill="rgb(236,214,54)" rx="2" ry="2" />
+<text  x="1181.96" y="527.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1045" width="60.7" height="15.0" fill="rgb(238,88,34)" rx="2" ry="2" />
+<text  x="1121.92" y="1055.5" >[unkno..</text>
+</g>
+<g >
+<title>[libc-2.33.so] (11 samples, 0.64%)</title><rect x="1007.1" y="1621" width="7.6" height="15.0" fill="rgb(235,123,44)" rx="2" ry="2" />
+<text  x="1010.13" y="1631.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="949" width="60.7" height="15.0" fill="rgb(208,52,29)" rx="2" ry="2" />
+<text  x="1121.92" y="959.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="997" width="60.7" height="15.0" fill="rgb(223,61,23)" rx="2" ry="2" />
+<text  x="1121.92" y="1007.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1669" width="0.7" height="15.0" fill="rgb(223,42,50)" rx="2" ry="2" />
+<text  x="1093.63" y="1679.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="821" width="1.4" height="15.0" fill="rgb(231,108,17)" rx="2" ry="2" />
+<text  x="1121.92" y="831.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="661" width="2.1" height="15.0" fill="rgb(223,81,38)" rx="2" ry="2" />
+<text  x="1123.30" y="671.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="901" width="60.7" height="15.0" fill="rgb(220,47,0)" rx="2" ry="2" />
+<text  x="1121.92" y="911.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1132.7" y="293" width="0.7" height="15.0" fill="rgb(246,126,25)" rx="2" ry="2" />
+<text  x="1135.73" y="303.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (21 samples, 1.23%)</title><rect x="1092.7" y="1637" width="14.5" height="15.0" fill="rgb(234,46,32)" rx="2" ry="2" />
+<text  x="1095.70" y="1647.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1941" width="0.7" height="15.0" fill="rgb(248,144,26)" rx="2" ry="2" />
+<text  x="1087.42" y="1951.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1813" width="0.7" height="15.0" fill="rgb(215,57,31)" rx="2" ry="2" />
+<text  x="1092.94" y="1823.5" ></text>
+</g>
+<g >
+<title>[unknown] (86 samples, 5.03%)</title><rect x="1120.3" y="757" width="59.3" height="15.0" fill="rgb(246,122,39)" rx="2" ry="2" />
+<text  x="1123.30" y="767.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1125.1" y="565" width="8.3" height="15.0" fill="rgb(248,32,37)" rx="2" ry="2" />
+<text  x="1128.13" y="575.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="702.8" y="1733" width="0.7" height="15.0" fill="rgb(232,8,53)" rx="2" ry="2" />
+<text  x="705.82" y="1743.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (61 samples, 3.57%)</title><rect x="1136.9" y="469" width="42.1" height="15.0" fill="rgb(225,193,23)" rx="2" ry="2" />
+<text  x="1139.87" y="479.5" >[pe..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="581" width="0.6" height="15.0" fill="rgb(249,114,13)" rx="2" ry="2" />
+<text  x="1181.96" y="591.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="469" width="2.7" height="15.0" fill="rgb(219,103,11)" rx="2" ry="2" />
+<text  x="1125.37" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown] (86 samples, 5.03%)</title><rect x="1120.3" y="741" width="59.3" height="15.0" fill="rgb(242,179,43)" rx="2" ry="2" />
+<text  x="1123.30" y="751.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (7 samples, 0.41%)</title><rect x="1128.6" y="421" width="4.8" height="15.0" fill="rgb(221,188,3)" rx="2" ry="2" />
+<text  x="1131.58" y="431.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1134.8" y="325" width="1.4" height="15.0" fill="rgb(227,173,35)" rx="2" ry="2" />
+<text  x="1137.80" y="335.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1637" width="61.4" height="15.0" fill="rgb(213,178,37)" rx="2" ry="2" />
+<text  x="1121.23" y="1647.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1125" width="60.7" height="15.0" fill="rgb(232,116,40)" rx="2" ry="2" />
+<text  x="1121.92" y="1135.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1589" width="60.7" height="15.0" fill="rgb(238,92,18)" rx="2" ry="2" />
+<text  x="1121.92" y="1599.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1,269 samples, 74.21%)</title><rect x="208.0" y="1973" width="875.7" height="15.0" fill="rgb(221,190,51)" rx="2" ry="2" />
+<text  x="211.05" y="1983.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1285" width="0.7" height="15.0" fill="rgb(234,103,46)" rx="2" ry="2" />
+<text  x="1121.23" y="1295.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1957" width="0.7" height="15.0" fill="rgb(247,201,33)" rx="2" ry="2" />
+<text  x="1087.42" y="1967.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (23 samples, 1.35%)</title><rect x="1091.3" y="1957" width="15.9" height="15.0" fill="rgb(239,81,33)" rx="2" ry="2" />
+<text  x="1094.32" y="1967.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1132.7" y="245" width="0.7" height="15.0" fill="rgb(234,129,52)" rx="2" ry="2" />
+<text  x="1135.73" y="255.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1125.1" y="485" width="8.3" height="15.0" fill="rgb(212,34,24)" rx="2" ry="2" />
+<text  x="1128.13" y="495.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1189" width="0.7" height="15.0" fill="rgb(226,95,16)" rx="2" ry="2" />
+<text  x="1121.23" y="1199.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (7 samples, 0.41%)</title><rect x="1128.6" y="405" width="4.8" height="15.0" fill="rgb(239,119,16)" rx="2" ry="2" />
+<text  x="1131.58" y="415.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1087.9" y="1861" width="2.0" height="15.0" fill="rgb(215,150,47)" rx="2" ry="2" />
+<text  x="1090.87" y="1871.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (16 samples, 0.94%)</title><rect x="1107.2" y="1829" width="11.0" height="15.0" fill="rgb(218,182,4)" rx="2" ry="2" />
+<text  x="1110.19" y="1839.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (16 samples, 0.94%)</title><rect x="1107.2" y="1941" width="11.0" height="15.0" fill="rgb(205,146,13)" rx="2" ry="2" />
+<text  x="1110.19" y="1951.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="853" width="1.4" height="15.0" fill="rgb(232,179,26)" rx="2" ry="2" />
+<text  x="1121.92" y="863.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1132.7" y="213" width="0.7" height="15.0" fill="rgb(222,204,53)" rx="2" ry="2" />
+<text  x="1135.73" y="223.5" ></text>
+</g>
+<g >
+<title>[unknown] (86 samples, 5.03%)</title><rect x="1120.3" y="869" width="59.3" height="15.0" fill="rgb(248,48,46)" rx="2" ry="2" />
+<text  x="1123.30" y="879.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1123.1" y="309" width="2.0" height="15.0" fill="rgb(218,113,7)" rx="2" ry="2" />
+<text  x="1126.06" y="319.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="501" width="2.7" height="15.0" fill="rgb(223,35,29)" rx="2" ry="2" />
+<text  x="1125.37" y="511.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="565" width="2.8" height="15.0" fill="rgb(245,1,7)" rx="2" ry="2" />
+<text  x="1136.42" y="575.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1829" width="0.7" height="15.0" fill="rgb(249,150,38)" rx="2" ry="2" />
+<text  x="1093.63" y="1839.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="389" width="2.7" height="15.0" fill="rgb(225,199,45)" rx="2" ry="2" />
+<text  x="1125.37" y="399.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1925" width="0.7" height="15.0" fill="rgb(223,28,46)" rx="2" ry="2" />
+<text  x="1092.94" y="1935.5" ></text>
+</g>
+<g >
+<title>[unknown] (83 samples, 4.85%)</title><rect x="1122.4" y="709" width="57.2" height="15.0" fill="rgb(240,35,20)" rx="2" ry="2" />
+<text  x="1125.37" y="719.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="535.1" y="1685" width="1.4" height="15.0" fill="rgb(242,4,18)" rx="2" ry="2" />
+<text  x="538.13" y="1695.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1589" width="0.7" height="15.0" fill="rgb(229,138,36)" rx="2" ry="2" />
+<text  x="1121.23" y="1599.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1685" width="61.4" height="15.0" fill="rgb(209,14,49)" rx="2" ry="2" />
+<text  x="1121.23" y="1695.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="501" width="0.6" height="15.0" fill="rgb(235,193,22)" rx="2" ry="2" />
+<text  x="1181.96" y="511.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (15 samples, 0.88%)</title><rect x="1107.9" y="1813" width="10.3" height="15.0" fill="rgb(218,227,41)" rx="2" ry="2" />
+<text  x="1110.88" y="1823.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="597" width="2.1" height="15.0" fill="rgb(207,138,11)" rx="2" ry="2" />
+<text  x="1123.30" y="607.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (6 samples, 0.35%)</title><rect x="1085.8" y="1925" width="4.1" height="15.0" fill="rgb(239,76,29)" rx="2" ry="2" />
+<text  x="1088.80" y="1935.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1701" width="0.7" height="15.0" fill="rgb(222,15,6)" rx="2" ry="2" />
+<text  x="1093.63" y="1711.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (61 samples, 3.57%)</title><rect x="1136.9" y="453" width="42.1" height="15.0" fill="rgb(239,218,32)" rx="2" ry="2" />
+<text  x="1139.87" y="463.5" >[pe..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (17 samples, 0.99%)</title><rect x="1167.2" y="245" width="11.8" height="15.0" fill="rgb(247,23,28)" rx="2" ry="2" />
+<text  x="1170.23" y="255.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (6 samples, 0.35%)</title><rect x="1103.1" y="1461" width="4.1" height="15.0" fill="rgb(235,63,47)" rx="2" ry="2" />
+<text  x="1106.05" y="1471.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (4 samples, 0.23%)</title><rect x="1133.4" y="645" width="2.8" height="15.0" fill="rgb(215,82,10)" rx="2" ry="2" />
+<text  x="1136.42" y="655.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="437" width="0.6" height="15.0" fill="rgb(205,9,48)" rx="2" ry="2" />
+<text  x="1181.96" y="447.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1237" width="0.7" height="15.0" fill="rgb(215,182,40)" rx="2" ry="2" />
+<text  x="1121.23" y="1247.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (4 samples, 0.23%)</title><rect x="1122.4" y="677" width="2.7" height="15.0" fill="rgb(227,89,16)" rx="2" ry="2" />
+<text  x="1125.37" y="687.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1749" width="0.7" height="15.0" fill="rgb(230,85,46)" rx="2" ry="2" />
+<text  x="1092.94" y="1759.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1765" width="0.7" height="15.0" fill="rgb(229,178,53)" rx="2" ry="2" />
+<text  x="1092.94" y="1775.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="549" width="2.1" height="15.0" fill="rgb(247,99,31)" rx="2" ry="2" />
+<text  x="1123.30" y="559.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1135.5" y="117" width="0.7" height="15.0" fill="rgb(250,108,51)" rx="2" ry="2" />
+<text  x="1138.49" y="127.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (6 samples, 0.35%)</title><rect x="1085.8" y="1909" width="4.1" height="15.0" fill="rgb(223,126,24)" rx="2" ry="2" />
+<text  x="1088.80" y="1919.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="270.2" y="1845" width="0.6" height="15.0" fill="rgb(241,173,11)" rx="2" ry="2" />
+<text  x="273.15" y="1855.5" ></text>
+</g>
+<g >
+<title>std::chrono::_V2::system_clock::now (1 samples, 0.06%)</title><rect x="1081.7" y="1797" width="0.7" height="15.0" fill="rgb(246,181,0)" rx="2" ry="2" />
+<text  x="1084.66" y="1807.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (62 samples, 3.63%)</title><rect x="1136.2" y="629" width="42.8" height="15.0" fill="rgb(241,112,31)" rx="2" ry="2" />
+<text  x="1139.18" y="639.5" >[lib..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1413" width="60.7" height="15.0" fill="rgb(235,142,40)" rx="2" ry="2" />
+<text  x="1121.92" y="1423.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1381" width="60.7" height="15.0" fill="rgb(233,88,12)" rx="2" ry="2" />
+<text  x="1121.92" y="1391.5" >[unkno..</text>
+</g>
+<g >
+<title>[[vdso]] (1 samples, 0.06%)</title><rect x="10.0" y="1989" width="0.7" height="15.0" fill="rgb(235,188,17)" rx="2" ry="2" />
+<text  x="13.00" y="1999.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (7 samples, 0.41%)</title><rect x="1174.1" y="181" width="4.9" height="15.0" fill="rgb(238,149,36)" rx="2" ry="2" />
+<text  x="1177.13" y="191.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="965" width="60.7" height="15.0" fill="rgb(243,186,10)" rx="2" ry="2" />
+<text  x="1121.92" y="975.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (16 samples, 0.94%)</title><rect x="1096.2" y="1605" width="11.0" height="15.0" fill="rgb(232,75,15)" rx="2" ry="2" />
+<text  x="1099.15" y="1615.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="405" width="2.8" height="15.0" fill="rgb(207,59,12)" rx="2" ry="2" />
+<text  x="1136.42" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1237" width="60.7" height="15.0" fill="rgb(247,227,13)" rx="2" ry="2" />
+<text  x="1121.92" y="1247.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1,012 samples, 59.18%)</title><rect x="384.0" y="1813" width="698.4" height="15.0" fill="rgb(208,123,2)" rx="2" ry="2" />
+<text  x="387.01" y="1823.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="437" width="2.8" height="15.0" fill="rgb(222,14,10)" rx="2" ry="2" />
+<text  x="1136.42" y="447.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="453" width="0.6" height="15.0" fill="rgb(231,9,51)" rx="2" ry="2" />
+<text  x="1181.96" y="463.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1893" width="0.7" height="15.0" fill="rgb(212,59,25)" rx="2" ry="2" />
+<text  x="1087.42" y="1903.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1941" width="0.7" height="15.0" fill="rgb(231,39,50)" rx="2" ry="2" />
+<text  x="1093.63" y="1951.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1941" width="0.7" height="15.0" fill="rgb(214,217,52)" rx="2" ry="2" />
+<text  x="1092.94" y="1951.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (1,555 samples, 90.94%)</title><rect x="10.7" y="1989" width="1073.0" height="15.0" fill="rgb(244,143,4)" rx="2" ry="2" />
+<text  x="13.69" y="1999.5" >[libc-2.33.so]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (10 samples, 0.58%)</title><rect x="1100.3" y="1509" width="6.9" height="15.0" fill="rgb(234,38,36)" rx="2" ry="2" />
+<text  x="1103.29" y="1519.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1121.0" y="485" width="1.4" height="15.0" fill="rgb(247,152,27)" rx="2" ry="2" />
+<text  x="1123.99" y="495.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1925" width="0.7" height="15.0" fill="rgb(213,196,18)" rx="2" ry="2" />
+<text  x="1087.42" y="1935.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (61 samples, 3.57%)</title><rect x="1136.9" y="501" width="42.1" height="15.0" fill="rgb(225,44,13)" rx="2" ry="2" />
+<text  x="1139.87" y="511.5" >[pe..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1525" width="0.7" height="15.0" fill="rgb(223,8,12)" rx="2" ry="2" />
+<text  x="1121.23" y="1535.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1605" width="60.7" height="15.0" fill="rgb(206,4,9)" rx="2" ry="2" />
+<text  x="1121.92" y="1615.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1109" width="60.7" height="15.0" fill="rgb(249,37,43)" rx="2" ry="2" />
+<text  x="1121.92" y="1119.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1157" width="60.7" height="15.0" fill="rgb(210,98,28)" rx="2" ry="2" />
+<text  x="1121.92" y="1167.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1124.4" y="149" width="0.7" height="15.0" fill="rgb(216,135,23)" rx="2" ry="2" />
+<text  x="1127.44" y="159.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="421" width="2.7" height="15.0" fill="rgb(237,174,23)" rx="2" ry="2" />
+<text  x="1125.37" y="431.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1176.2" y="149" width="2.8" height="15.0" fill="rgb(244,125,21)" rx="2" ry="2" />
+<text  x="1179.20" y="159.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="805" width="1.4" height="15.0" fill="rgb(219,62,23)" rx="2" ry="2" />
+<text  x="1121.92" y="815.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1733" width="61.4" height="15.0" fill="rgb(233,101,15)" rx="2" ry="2" />
+<text  x="1121.23" y="1743.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="535.8" y="1669" width="0.7" height="15.0" fill="rgb(233,73,40)" rx="2" ry="2" />
+<text  x="538.82" y="1679.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (57 samples, 3.33%)</title><rect x="1139.6" y="389" width="39.4" height="15.0" fill="rgb(235,151,49)" rx="2" ry="2" />
+<text  x="1142.63" y="399.5" >[pe..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1188.6" y="1957" width="1.4" height="15.0" fill="rgb(213,76,51)" rx="2" ry="2" />
+<text  x="1191.62" y="1967.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (12 samples, 0.70%)</title><rect x="1125.1" y="661" width="8.3" height="15.0" fill="rgb(246,198,3)" rx="2" ry="2" />
+<text  x="1128.13" y="671.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1573" width="0.7" height="15.0" fill="rgb(208,48,0)" rx="2" ry="2" />
+<text  x="1121.23" y="1583.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="629" width="1.4" height="15.0" fill="rgb(234,184,50)" rx="2" ry="2" />
+<text  x="1121.92" y="639.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1749" width="0.7" height="15.0" fill="rgb(232,99,1)" rx="2" ry="2" />
+<text  x="1093.63" y="1759.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1135.5" y="133" width="0.7" height="15.0" fill="rgb(237,48,41)" rx="2" ry="2" />
+<text  x="1138.49" y="143.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1087.9" y="1845" width="2.0" height="15.0" fill="rgb(224,34,9)" rx="2" ry="2" />
+<text  x="1090.87" y="1855.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1205" width="60.7" height="15.0" fill="rgb(239,151,23)" rx="2" ry="2" />
+<text  x="1121.92" y="1215.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="469" width="0.6" height="15.0" fill="rgb(205,152,28)" rx="2" ry="2" />
+<text  x="1181.96" y="479.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1781" width="15.9" height="15.0" fill="rgb(228,208,36)" rx="2" ry="2" />
+<text  x="1094.32" y="1791.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="1083.7" y="1973" width="0.7" height="15.0" fill="rgb(216,165,3)" rx="2" ry="2" />
+<text  x="1086.73" y="1983.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1135.5" y="181" width="0.7" height="15.0" fill="rgb(228,28,49)" rx="2" ry="2" />
+<text  x="1138.49" y="191.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1205" width="0.7" height="15.0" fill="rgb(232,109,32)" rx="2" ry="2" />
+<text  x="1121.23" y="1215.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (5 samples, 0.29%)</title><rect x="1103.7" y="1445" width="3.5" height="15.0" fill="rgb(253,212,15)" rx="2" ry="2" />
+<text  x="1106.74" y="1455.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1749" width="15.9" height="15.0" fill="rgb(247,201,22)" rx="2" ry="2" />
+<text  x="1094.32" y="1759.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1637" width="0.7" height="15.0" fill="rgb(236,153,22)" rx="2" ry="2" />
+<text  x="1093.63" y="1647.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1,269 samples, 74.21%)</title><rect x="208.0" y="1925" width="875.7" height="15.0" fill="rgb(243,198,17)" rx="2" ry="2" />
+<text  x="211.05" y="1935.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1349" width="60.7" height="15.0" fill="rgb(225,152,46)" rx="2" ry="2" />
+<text  x="1121.92" y="1359.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (61 samples, 3.57%)</title><rect x="1136.9" y="437" width="42.1" height="15.0" fill="rgb(230,209,10)" rx="2" ry="2" />
+<text  x="1139.87" y="447.5" >[pe..</text>
+</g>
+<g >
+<title>[[vdso]] (281 samples, 16.43%)</title><rect x="14.1" y="1973" width="193.9" height="15.0" fill="rgb(217,119,1)" rx="2" ry="2" />
+<text  x="17.14" y="1983.5" >[[vdso]]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1781" width="0.7" height="15.0" fill="rgb(228,65,17)" rx="2" ry="2" />
+<text  x="1093.63" y="1791.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1349" width="0.7" height="15.0" fill="rgb(221,177,8)" rx="2" ry="2" />
+<text  x="1121.23" y="1359.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="325" width="0.6" height="15.0" fill="rgb(218,147,21)" rx="2" ry="2" />
+<text  x="1181.96" y="335.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (16 samples, 0.94%)</title><rect x="1107.2" y="1845" width="11.0" height="15.0" fill="rgb(205,15,5)" rx="2" ry="2" />
+<text  x="1110.19" y="1855.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1135.5" y="213" width="0.7" height="15.0" fill="rgb(242,32,18)" rx="2" ry="2" />
+<text  x="1138.49" y="223.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1125.1" y="629" width="8.3" height="15.0" fill="rgb(240,42,30)" rx="2" ry="2" />
+<text  x="1128.13" y="639.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1135.5" y="229" width="0.7" height="15.0" fill="rgb(227,199,10)" rx="2" ry="2" />
+<text  x="1138.49" y="239.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1605" width="0.7" height="15.0" fill="rgb(244,11,7)" rx="2" ry="2" />
+<text  x="1087.42" y="1615.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1717" width="0.7" height="15.0" fill="rgb(205,73,11)" rx="2" ry="2" />
+<text  x="1087.42" y="1727.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="645" width="1.4" height="15.0" fill="rgb(222,188,2)" rx="2" ry="2" />
+<text  x="1121.92" y="655.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1941" width="15.9" height="15.0" fill="rgb(218,150,21)" rx="2" ry="2" />
+<text  x="1094.32" y="1951.5" ></text>
+</g>
+<g >
+<title>std::_Hash_bytes (4 samples, 0.23%)</title><rect x="1076.1" y="1749" width="2.8" height="15.0" fill="rgb(247,111,40)" rx="2" ry="2" />
+<text  x="1079.14" y="1759.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="535.8" y="1653" width="0.7" height="15.0" fill="rgb(246,27,1)" rx="2" ry="2" />
+<text  x="538.82" y="1663.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1221" width="0.7" height="15.0" fill="rgb(225,99,25)" rx="2" ry="2" />
+<text  x="1121.23" y="1231.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1813" width="15.9" height="15.0" fill="rgb(209,80,5)" rx="2" ry="2" />
+<text  x="1094.32" y="1823.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1123.1" y="245" width="2.0" height="15.0" fill="rgb(206,186,14)" rx="2" ry="2" />
+<text  x="1126.06" y="255.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1493" width="0.7" height="15.0" fill="rgb(247,131,51)" rx="2" ry="2" />
+<text  x="1121.23" y="1503.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1106.5" y="1349" width="0.7" height="15.0" fill="rgb(246,12,17)" rx="2" ry="2" />
+<text  x="1109.50" y="1359.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1083.7" y="1925" width="0.7" height="15.0" fill="rgb(206,145,32)" rx="2" ry="2" />
+<text  x="1086.73" y="1935.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1925" width="61.4" height="15.0" fill="rgb(240,27,45)" rx="2" ry="2" />
+<text  x="1121.23" y="1935.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1157" width="0.7" height="15.0" fill="rgb(234,18,48)" rx="2" ry="2" />
+<text  x="1121.23" y="1167.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="565" width="2.1" height="15.0" fill="rgb(219,216,27)" rx="2" ry="2" />
+<text  x="1123.30" y="575.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1317" width="0.7" height="15.0" fill="rgb(236,120,7)" rx="2" ry="2" />
+<text  x="1121.23" y="1327.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1877" width="0.7" height="15.0" fill="rgb(223,119,18)" rx="2" ry="2" />
+<text  x="1087.42" y="1887.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1765" width="0.7" height="15.0" fill="rgb(243,153,16)" rx="2" ry="2" />
+<text  x="1093.63" y="1775.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (5 samples, 0.29%)</title><rect x="533.1" y="1765" width="3.4" height="15.0" fill="rgb(248,44,8)" rx="2" ry="2" />
+<text  x="536.06" y="1775.5" ></text>
+</g>
+<g >
+<title>[unknown] (8 samples, 0.47%)</title><rect x="1180.3" y="1957" width="5.6" height="15.0" fill="rgb(211,8,48)" rx="2" ry="2" />
+<text  x="1183.34" y="1967.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (11 samples, 0.64%)</title><rect x="1110.6" y="1749" width="7.6" height="15.0" fill="rgb(247,141,4)" rx="2" ry="2" />
+<text  x="1113.64" y="1759.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (16 samples, 0.94%)</title><rect x="1107.2" y="1909" width="11.0" height="15.0" fill="rgb(216,204,52)" rx="2" ry="2" />
+<text  x="1110.19" y="1919.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="757" width="1.4" height="15.0" fill="rgb(232,111,41)" rx="2" ry="2" />
+<text  x="1121.92" y="767.5" ></text>
+</g>
+<g >
+<title>[unknown] (129 samples, 7.54%)</title><rect x="1091.3" y="1973" width="89.0" height="15.0" fill="rgb(208,195,33)" rx="2" ry="2" />
+<text  x="1094.32" y="1983.5" >[unknown]</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="933" width="60.7" height="15.0" fill="rgb(226,44,24)" rx="2" ry="2" />
+<text  x="1121.92" y="943.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1121.0" y="501" width="1.4" height="15.0" fill="rgb(219,216,27)" rx="2" ry="2" />
+<text  x="1123.99" y="511.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1125.1" y="533" width="8.3" height="15.0" fill="rgb(208,229,8)" rx="2" ry="2" />
+<text  x="1128.13" y="543.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1123.1" y="325" width="2.0" height="15.0" fill="rgb(216,208,22)" rx="2" ry="2" />
+<text  x="1126.06" y="335.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1445" width="60.7" height="15.0" fill="rgb(218,142,48)" rx="2" ry="2" />
+<text  x="1121.92" y="1455.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1909" width="15.9" height="15.0" fill="rgb(254,107,4)" rx="2" ry="2" />
+<text  x="1094.32" y="1919.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1116.9" y="1669" width="0.6" height="15.0" fill="rgb(245,95,11)" rx="2" ry="2" />
+<text  x="1119.85" y="1679.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1134.8" y="309" width="1.4" height="15.0" fill="rgb(228,122,39)" rx="2" ry="2" />
+<text  x="1137.80" y="319.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (84 samples, 4.91%)</title><rect x="1014.7" y="1621" width="58.0" height="15.0" fill="rgb(229,106,0)" rx="2" ry="2" />
+<text  x="1017.73" y="1631.5" >[perf_..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1141" width="0.7" height="15.0" fill="rgb(216,157,7)" rx="2" ry="2" />
+<text  x="1121.23" y="1151.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1733" width="0.7" height="15.0" fill="rgb(232,56,45)" rx="2" ry="2" />
+<text  x="1093.63" y="1743.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1119.6" y="549" width="0.7" height="15.0" fill="rgb(209,3,19)" rx="2" ry="2" />
+<text  x="1122.61" y="559.5" ></text>
+</g>
+<g >
+<title>[unknown] (86 samples, 5.03%)</title><rect x="1120.3" y="853" width="59.3" height="15.0" fill="rgb(237,167,23)" rx="2" ry="2" />
+<text  x="1123.30" y="863.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1605" width="0.7" height="15.0" fill="rgb(220,214,39)" rx="2" ry="2" />
+<text  x="1121.23" y="1615.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1765" width="61.4" height="15.0" fill="rgb(236,30,27)" rx="2" ry="2" />
+<text  x="1121.23" y="1775.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1573" width="60.7" height="15.0" fill="rgb(247,39,32)" rx="2" ry="2" />
+<text  x="1121.92" y="1583.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (8 samples, 0.47%)</title><rect x="1101.7" y="1493" width="5.5" height="15.0" fill="rgb(229,107,13)" rx="2" ry="2" />
+<text  x="1104.67" y="1503.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1301" width="60.7" height="15.0" fill="rgb(225,160,12)" rx="2" ry="2" />
+<text  x="1121.92" y="1311.5" >[unkno..</text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="1084.4" y="1973" width="0.7" height="15.0" fill="rgb(232,202,12)" rx="2" ry="2" />
+<text  x="1087.42" y="1983.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1177.6" y="117" width="1.4" height="15.0" fill="rgb(241,108,1)" rx="2" ry="2" />
+<text  x="1180.58" y="127.5" ></text>
+</g>
+<g >
+<title>[unknown] (83 samples, 4.85%)</title><rect x="1122.4" y="693" width="57.2" height="15.0" fill="rgb(237,55,5)" rx="2" ry="2" />
+<text  x="1125.37" y="703.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1123.8" y="213" width="1.3" height="15.0" fill="rgb(206,108,18)" rx="2" ry="2" />
+<text  x="1126.75" y="223.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="373" width="2.7" height="15.0" fill="rgb(237,35,28)" rx="2" ry="2" />
+<text  x="1125.37" y="383.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1845" width="0.7" height="15.0" fill="rgb(234,81,11)" rx="2" ry="2" />
+<text  x="1093.63" y="1855.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1134.8" y="261" width="1.4" height="15.0" fill="rgb(220,100,24)" rx="2" ry="2" />
+<text  x="1137.80" y="271.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1877" width="61.4" height="15.0" fill="rgb(234,153,49)" rx="2" ry="2" />
+<text  x="1121.23" y="1887.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1397" width="0.7" height="15.0" fill="rgb(222,223,38)" rx="2" ry="2" />
+<text  x="1121.23" y="1407.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1132.7" y="261" width="0.7" height="15.0" fill="rgb(243,92,40)" rx="2" ry="2" />
+<text  x="1135.73" y="271.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1541" width="0.7" height="15.0" fill="rgb(225,204,8)" rx="2" ry="2" />
+<text  x="1087.42" y="1551.5" ></text>
+</g>
+<g >
+<title>std::__detail::_List_node_base::_M_transfer (1 samples, 0.06%)</title><rect x="1075.5" y="1717" width="0.6" height="15.0" fill="rgb(212,6,30)" rx="2" ry="2" />
+<text  x="1078.45" y="1727.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1717" width="0.7" height="15.0" fill="rgb(231,195,31)" rx="2" ry="2" />
+<text  x="1093.63" y="1727.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="1118.2" y="1621" width="0.7" height="15.0" fill="rgb(254,145,31)" rx="2" ry="2" />
+<text  x="1121.23" y="1631.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1925" width="0.7" height="15.0" fill="rgb(229,186,53)" rx="2" ry="2" />
+<text  x="1093.63" y="1935.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1,269 samples, 74.21%)</title><rect x="208.0" y="1957" width="875.7" height="15.0" fill="rgb(206,179,25)" rx="2" ry="2" />
+<text  x="211.05" y="1967.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1733" width="15.9" height="15.0" fill="rgb(207,58,54)" rx="2" ry="2" />
+<text  x="1094.32" y="1743.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1178.3" y="101" width="0.7" height="15.0" fill="rgb(244,31,11)" rx="2" ry="2" />
+<text  x="1181.27" y="111.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (890 samples, 52.05%)</title><rect x="466.1" y="1781" width="614.2" height="15.0" fill="rgb(234,163,38)" rx="2" ry="2" />
+<text  x="469.13" y="1791.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1893" width="0.7" height="15.0" fill="rgb(221,200,53)" rx="2" ry="2" />
+<text  x="1092.94" y="1903.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1925" width="15.9" height="15.0" fill="rgb(226,157,6)" rx="2" ry="2" />
+<text  x="1094.32" y="1935.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1125.1" y="549" width="8.3" height="15.0" fill="rgb(205,209,35)" rx="2" ry="2" />
+<text  x="1128.13" y="559.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (19 samples, 1.11%)</title><rect x="1165.8" y="261" width="13.2" height="15.0" fill="rgb(249,222,6)" rx="2" ry="2" />
+<text  x="1168.85" y="271.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (7 samples, 0.41%)</title><rect x="1102.4" y="1477" width="4.8" height="15.0" fill="rgb(212,57,4)" rx="2" ry="2" />
+<text  x="1105.36" y="1487.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (57 samples, 3.33%)</title><rect x="1139.6" y="405" width="39.4" height="15.0" fill="rgb(249,168,0)" rx="2" ry="2" />
+<text  x="1142.63" y="415.5" >[pe..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1134.1" y="357" width="2.1" height="15.0" fill="rgb(227,44,16)" rx="2" ry="2" />
+<text  x="1137.11" y="367.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (2 samples, 0.12%)</title><rect x="1118.9" y="869" width="1.4" height="15.0" fill="rgb(211,7,5)" rx="2" ry="2" />
+<text  x="1121.92" y="879.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="535.1" y="1701" width="1.4" height="15.0" fill="rgb(249,229,26)" rx="2" ry="2" />
+<text  x="538.13" y="1711.5" ></text>
+</g>
+<g >
+<title>virtual thunk to std::basic_ostream&lt;char, std::char_traits&lt;char&gt; &gt;::~basic_ostream (1 samples, 0.06%)</title><rect x="1187.2" y="1973" width="0.7" height="15.0" fill="rgb(208,211,20)" rx="2" ry="2" />
+<text  x="1190.24" y="1983.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (45 samples, 2.63%)</title><rect x="1147.9" y="341" width="31.1" height="15.0" fill="rgb(253,100,43)" rx="2" ry="2" />
+<text  x="1150.91" y="351.5" >[p..</text>
+</g>
+<g >
+<title>__cxxabiv1::__vmi_class_type_info::__do_dyncast (1 samples, 0.06%)</title><rect x="1185.2" y="1941" width="0.7" height="15.0" fill="rgb(249,157,25)" rx="2" ry="2" />
+<text  x="1188.17" y="1951.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1188.6" y="1941" width="1.4" height="15.0" fill="rgb(211,59,15)" rx="2" ry="2" />
+<text  x="1191.62" y="1951.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="485" width="2.7" height="15.0" fill="rgb(205,138,5)" rx="2" ry="2" />
+<text  x="1125.37" y="495.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1509" width="0.7" height="15.0" fill="rgb(225,168,3)" rx="2" ry="2" />
+<text  x="1121.23" y="1519.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1525" width="60.7" height="15.0" fill="rgb(222,177,53)" rx="2" ry="2" />
+<text  x="1121.92" y="1535.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="389" width="0.6" height="15.0" fill="rgb(209,60,37)" rx="2" ry="2" />
+<text  x="1181.96" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1429" width="60.7" height="15.0" fill="rgb(216,62,29)" rx="2" ry="2" />
+<text  x="1121.92" y="1439.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1134.8" y="293" width="1.4" height="15.0" fill="rgb(225,104,44)" rx="2" ry="2" />
+<text  x="1137.80" y="303.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__vmi_class_type_info::__do_dyncast (2 samples, 0.12%)</title><rect x="1185.9" y="1973" width="1.3" height="15.0" fill="rgb(250,164,20)" rx="2" ry="2" />
+<text  x="1188.86" y="1983.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1477" width="60.7" height="15.0" fill="rgb(237,18,19)" rx="2" ry="2" />
+<text  x="1121.92" y="1487.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="535.1" y="1717" width="1.4" height="15.0" fill="rgb(251,90,31)" rx="2" ry="2" />
+<text  x="538.13" y="1727.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (62 samples, 3.63%)</title><rect x="1136.2" y="549" width="42.8" height="15.0" fill="rgb(240,79,38)" rx="2" ry="2" />
+<text  x="1139.18" y="559.5" >[per..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1083.7" y="1957" width="0.7" height="15.0" fill="rgb(215,73,29)" rx="2" ry="2" />
+<text  x="1086.73" y="1967.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="421" width="2.8" height="15.0" fill="rgb(221,5,8)" rx="2" ry="2" />
+<text  x="1136.42" y="431.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (10 samples, 0.58%)</title><rect x="1126.5" y="453" width="6.9" height="15.0" fill="rgb(206,203,0)" rx="2" ry="2" />
+<text  x="1129.51" y="463.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1121.7" y="469" width="0.7" height="15.0" fill="rgb(212,78,19)" rx="2" ry="2" />
+<text  x="1124.68" y="479.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1135.5" y="165" width="0.7" height="15.0" fill="rgb(253,52,41)" rx="2" ry="2" />
+<text  x="1138.49" y="175.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1178.3" y="69" width="0.7" height="15.0" fill="rgb(223,207,5)" rx="2" ry="2" />
+<text  x="1181.27" y="79.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (62 samples, 3.63%)</title><rect x="1136.2" y="597" width="42.8" height="15.0" fill="rgb(211,88,46)" rx="2" ry="2" />
+<text  x="1139.18" y="607.5" >[per..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (16 samples, 0.94%)</title><rect x="1107.2" y="1925" width="11.0" height="15.0" fill="rgb(209,194,41)" rx="2" ry="2" />
+<text  x="1110.19" y="1935.5" ></text>
+</g>
+<g >
+<title>[unknown] (149 samples, 8.71%)</title><rect x="1085.1" y="1989" width="102.8" height="15.0" fill="rgb(253,135,54)" rx="2" ry="2" />
+<text  x="1088.11" y="1999.5" >[unknown]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="661" width="2.7" height="15.0" fill="rgb(254,193,39)" rx="2" ry="2" />
+<text  x="1125.37" y="671.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1121.7" y="453" width="0.7" height="15.0" fill="rgb(230,25,21)" rx="2" ry="2" />
+<text  x="1124.68" y="463.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1845" width="0.7" height="15.0" fill="rgb(233,67,28)" rx="2" ry="2" />
+<text  x="1092.94" y="1855.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1685" width="0.7" height="15.0" fill="rgb(219,61,7)" rx="2" ry="2" />
+<text  x="1087.42" y="1695.5" ></text>
+</g>
+<g >
+<title>[unknown] (67 samples, 3.92%)</title><rect x="1133.4" y="661" width="46.2" height="15.0" fill="rgb(253,1,49)" rx="2" ry="2" />
+<text  x="1136.42" y="671.5" >[unk..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="645" width="2.1" height="15.0" fill="rgb(239,197,5)" rx="2" ry="2" />
+<text  x="1123.30" y="655.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="453" width="2.8" height="15.0" fill="rgb(215,110,24)" rx="2" ry="2" />
+<text  x="1136.42" y="463.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1557" width="0.7" height="15.0" fill="rgb(217,24,6)" rx="2" ry="2" />
+<text  x="1121.23" y="1567.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1119.6" y="565" width="0.7" height="15.0" fill="rgb(218,165,28)" rx="2" ry="2" />
+<text  x="1122.61" y="575.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1477" width="0.7" height="15.0" fill="rgb(213,33,27)" rx="2" ry="2" />
+<text  x="1121.23" y="1487.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1909" width="0.7" height="15.0" fill="rgb(211,198,38)" rx="2" ry="2" />
+<text  x="1087.42" y="1919.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1749" width="61.4" height="15.0" fill="rgb(210,212,15)" rx="2" ry="2" />
+<text  x="1121.23" y="1759.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1106.5" y="1381" width="0.7" height="15.0" fill="rgb(229,156,5)" rx="2" ry="2" />
+<text  x="1109.50" y="1391.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1797" width="61.4" height="15.0" fill="rgb(245,138,10)" rx="2" ry="2" />
+<text  x="1121.23" y="1807.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1941" width="61.4" height="15.0" fill="rgb(211,29,2)" rx="2" ry="2" />
+<text  x="1121.23" y="1951.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (86 samples, 5.03%)</title><rect x="1120.3" y="821" width="59.3" height="15.0" fill="rgb(229,128,48)" rx="2" ry="2" />
+<text  x="1123.30" y="831.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1333" width="60.7" height="15.0" fill="rgb(245,224,52)" rx="2" ry="2" />
+<text  x="1121.92" y="1343.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="581" width="2.8" height="15.0" fill="rgb(216,119,45)" rx="2" ry="2" />
+<text  x="1136.42" y="591.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1813" width="0.7" height="15.0" fill="rgb(219,44,46)" rx="2" ry="2" />
+<text  x="1087.42" y="1823.5" ></text>
+</g>
+<g >
+<title>libat_store_16_i1 (1 samples, 0.06%)</title><rect x="1082.4" y="1845" width="0.6" height="15.0" fill="rgb(250,115,22)" rx="2" ry="2" />
+<text  x="1085.35" y="1855.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (51 samples, 2.98%)</title><rect x="1143.8" y="357" width="35.2" height="15.0" fill="rgb(235,91,25)" rx="2" ry="2" />
+<text  x="1146.77" y="367.5" >[p..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1119.6" y="581" width="0.7" height="15.0" fill="rgb(207,40,53)" rx="2" ry="2" />
+<text  x="1122.61" y="591.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (62 samples, 3.63%)</title><rect x="1136.2" y="565" width="42.8" height="15.0" fill="rgb(243,45,5)" rx="2" ry="2" />
+<text  x="1139.18" y="575.5" >[per..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="613" width="2.1" height="15.0" fill="rgb(233,139,45)" rx="2" ry="2" />
+<text  x="1123.30" y="623.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1124.4" y="181" width="0.7" height="15.0" fill="rgb(212,180,23)" rx="2" ry="2" />
+<text  x="1127.44" y="191.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="341" width="0.6" height="15.0" fill="rgb(252,105,43)" rx="2" ry="2" />
+<text  x="1181.96" y="351.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1093" width="60.7" height="15.0" fill="rgb(217,158,43)" rx="2" ry="2" />
+<text  x="1121.92" y="1103.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (33 samples, 1.93%)</title><rect x="1049.9" y="1589" width="22.8" height="15.0" fill="rgb(230,164,29)" rx="2" ry="2" />
+<text  x="1052.92" y="1599.5" >[..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (16 samples, 0.94%)</title><rect x="1107.2" y="1861" width="11.0" height="15.0" fill="rgb(250,69,10)" rx="2" ry="2" />
+<text  x="1110.19" y="1871.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="517" width="2.7" height="15.0" fill="rgb(234,15,40)" rx="2" ry="2" />
+<text  x="1125.37" y="527.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1845" width="61.4" height="15.0" fill="rgb(205,150,26)" rx="2" ry="2" />
+<text  x="1121.23" y="1855.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="469" width="2.8" height="15.0" fill="rgb(240,144,35)" rx="2" ry="2" />
+<text  x="1136.42" y="479.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1134.8" y="277" width="1.4" height="15.0" fill="rgb(214,216,53)" rx="2" ry="2" />
+<text  x="1137.80" y="287.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1797" width="0.7" height="15.0" fill="rgb(228,226,42)" rx="2" ry="2" />
+<text  x="1093.63" y="1807.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="789" width="1.4" height="15.0" fill="rgb(251,159,13)" rx="2" ry="2" />
+<text  x="1121.92" y="799.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1701" width="0.7" height="15.0" fill="rgb(241,173,44)" rx="2" ry="2" />
+<text  x="1087.42" y="1711.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1541" width="0.7" height="15.0" fill="rgb(212,54,8)" rx="2" ry="2" />
+<text  x="1121.23" y="1551.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__si_class_type_info::~__si_class_type_info (8 samples, 0.47%)</title><rect x="1180.3" y="1973" width="5.6" height="15.0" fill="rgb(246,140,17)" rx="2" ry="2" />
+<text  x="1183.34" y="1983.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1,269 samples, 74.21%)</title><rect x="208.0" y="1893" width="875.7" height="15.0" fill="rgb(235,17,38)" rx="2" ry="2" />
+<text  x="211.05" y="1903.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1188.6" y="1973" width="1.4" height="15.0" fill="rgb(219,114,40)" rx="2" ry="2" />
+<text  x="1191.62" y="1983.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1071.3" y="1557" width="1.4" height="15.0" fill="rgb(242,57,38)" rx="2" ry="2" />
+<text  x="1074.31" y="1567.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1087.2" y="1877" width="2.7" height="15.0" fill="rgb(225,59,28)" rx="2" ry="2" />
+<text  x="1090.18" y="1887.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1381" width="0.7" height="15.0" fill="rgb(208,9,36)" rx="2" ry="2" />
+<text  x="1121.23" y="1391.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="581" width="2.7" height="15.0" fill="rgb(213,198,18)" rx="2" ry="2" />
+<text  x="1125.37" y="591.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="549" width="2.8" height="15.0" fill="rgb(224,14,28)" rx="2" ry="2" />
+<text  x="1136.42" y="559.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (13 samples, 0.76%)</title><rect x="1098.2" y="1573" width="9.0" height="15.0" fill="rgb(236,207,18)" rx="2" ry="2" />
+<text  x="1101.22" y="1583.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1893" width="61.4" height="15.0" fill="rgb(229,197,27)" rx="2" ry="2" />
+<text  x="1121.23" y="1903.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1178.3" y="53" width="0.7" height="15.0" fill="rgb(229,140,19)" rx="2" ry="2" />
+<text  x="1181.27" y="63.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_stringbuf&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::overflow (2 samples, 0.12%)</title><rect x="1188.6" y="1989" width="1.4" height="15.0" fill="rgb(253,114,14)" rx="2" ry="2" />
+<text  x="1191.62" y="1999.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (16 samples, 0.94%)</title><rect x="1107.2" y="1893" width="11.0" height="15.0" fill="rgb(234,20,10)" rx="2" ry="2" />
+<text  x="1110.19" y="1903.5" ></text>
+</g>
+<g >
+<title>[unknown] (86 samples, 5.03%)</title><rect x="1120.3" y="773" width="59.3" height="15.0" fill="rgb(220,183,53)" rx="2" ry="2" />
+<text  x="1123.30" y="783.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (786 samples, 45.96%)</title><rect x="536.5" y="1765" width="542.4" height="15.0" fill="rgb(228,66,13)" rx="2" ry="2" />
+<text  x="539.51" y="1775.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="437" width="2.7" height="15.0" fill="rgb(249,210,11)" rx="2" ry="2" />
+<text  x="1125.37" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1141" width="60.7" height="15.0" fill="rgb(222,64,6)" rx="2" ry="2" />
+<text  x="1121.92" y="1151.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1653" width="61.4" height="15.0" fill="rgb(218,124,12)" rx="2" ry="2" />
+<text  x="1121.23" y="1663.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1909" width="61.4" height="15.0" fill="rgb(241,15,37)" rx="2" ry="2" />
+<text  x="1121.23" y="1919.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="535.1" y="1733" width="1.4" height="15.0" fill="rgb(219,137,22)" rx="2" ry="2" />
+<text  x="538.13" y="1743.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="645" width="2.7" height="15.0" fill="rgb(213,12,46)" rx="2" ry="2" />
+<text  x="1125.37" y="655.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="565" width="2.7" height="15.0" fill="rgb(214,12,0)" rx="2" ry="2" />
+<text  x="1125.37" y="575.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1132.7" y="277" width="0.7" height="15.0" fill="rgb(209,45,32)" rx="2" ry="2" />
+<text  x="1135.73" y="287.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="533" width="0.6" height="15.0" fill="rgb(223,165,46)" rx="2" ry="2" />
+<text  x="1181.96" y="543.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1125.1" y="645" width="8.3" height="15.0" fill="rgb(250,14,42)" rx="2" ry="2" />
+<text  x="1128.13" y="655.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1,082 samples, 63.27%)</title><rect x="335.7" y="1829" width="746.7" height="15.0" fill="rgb(231,219,51)" rx="2" ry="2" />
+<text  x="338.71" y="1839.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1829" width="15.9" height="15.0" fill="rgb(231,17,10)" rx="2" ry="2" />
+<text  x="1094.32" y="1839.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="693" width="2.1" height="15.0" fill="rgb(239,41,42)" rx="2" ry="2" />
+<text  x="1123.30" y="703.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="837" width="1.4" height="15.0" fill="rgb(244,154,35)" rx="2" ry="2" />
+<text  x="1121.92" y="847.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1132.7" y="341" width="0.7" height="15.0" fill="rgb(218,145,17)" rx="2" ry="2" />
+<text  x="1135.73" y="351.5" ></text>
+</g>
+<g >
+<title>__dynamic_cast (1 samples, 0.06%)</title><rect x="1117.5" y="1733" width="0.7" height="15.0" fill="rgb(246,180,42)" rx="2" ry="2" />
+<text  x="1120.54" y="1743.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (58 samples, 3.39%)</title><rect x="1138.9" y="421" width="40.1" height="15.0" fill="rgb(232,13,7)" rx="2" ry="2" />
+<text  x="1141.94" y="431.5" >[pe..</text>
+</g>
+<g >
+<title>std::__detail::_Prime_rehash_policy::_M_next_bkt (1 samples, 0.06%)</title><rect x="1083.0" y="1861" width="0.7" height="15.0" fill="rgb(248,63,42)" rx="2" ry="2" />
+<text  x="1086.04" y="1871.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1115.5" y="1701" width="2.0" height="15.0" fill="rgb(228,28,22)" rx="2" ry="2" />
+<text  x="1118.47" y="1711.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="405" width="2.7" height="15.0" fill="rgb(244,148,24)" rx="2" ry="2" />
+<text  x="1125.37" y="415.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1125.1" y="501" width="8.3" height="15.0" fill="rgb(205,64,27)" rx="2" ry="2" />
+<text  x="1128.13" y="511.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1877" width="15.9" height="15.0" fill="rgb(252,58,35)" rx="2" ry="2" />
+<text  x="1094.32" y="1887.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1122.4" y="549" width="2.7" height="15.0" fill="rgb(226,114,24)" rx="2" ry="2" />
+<text  x="1125.37" y="559.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (16 samples, 0.94%)</title><rect x="1107.2" y="1877" width="11.0" height="15.0" fill="rgb(212,135,43)" rx="2" ry="2" />
+<text  x="1110.19" y="1887.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1,269 samples, 74.21%)</title><rect x="208.0" y="1941" width="875.7" height="15.0" fill="rgb(237,14,15)" rx="2" ry="2" />
+<text  x="211.05" y="1951.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1132.7" y="325" width="0.7" height="15.0" fill="rgb(236,193,13)" rx="2" ry="2" />
+<text  x="1135.73" y="335.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1106.5" y="1317" width="0.7" height="15.0" fill="rgb(252,0,27)" rx="2" ry="2" />
+<text  x="1109.50" y="1327.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1765" width="0.7" height="15.0" fill="rgb(216,197,46)" rx="2" ry="2" />
+<text  x="1087.42" y="1775.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (11 samples, 0.64%)</title><rect x="1125.8" y="469" width="7.6" height="15.0" fill="rgb(237,114,24)" rx="2" ry="2" />
+<text  x="1128.82" y="479.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1132.7" y="229" width="0.7" height="15.0" fill="rgb(221,185,38)" rx="2" ry="2" />
+<text  x="1135.73" y="239.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__si_class_type_info::__do_dyncast (3 samples, 0.18%)</title><rect x="1183.1" y="1941" width="2.1" height="15.0" fill="rgb(230,26,15)" rx="2" ry="2" />
+<text  x="1186.10" y="1951.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (61 samples, 3.57%)</title><rect x="1136.9" y="485" width="42.1" height="15.0" fill="rgb(205,191,2)" rx="2" ry="2" />
+<text  x="1139.87" y="495.5" >[pe..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="773" width="1.4" height="15.0" fill="rgb(210,165,45)" rx="2" ry="2" />
+<text  x="1121.92" y="783.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (27 samples, 1.58%)</title><rect x="1160.3" y="293" width="18.7" height="15.0" fill="rgb(205,96,3)" rx="2" ry="2" />
+<text  x="1163.33" y="303.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="465.4" y="1781" width="0.7" height="15.0" fill="rgb(221,204,47)" rx="2" ry="2" />
+<text  x="468.44" y="1791.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1669" width="15.9" height="15.0" fill="rgb(223,91,46)" rx="2" ry="2" />
+<text  x="1094.32" y="1679.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (22 samples, 1.29%)</title><rect x="1092.0" y="1653" width="15.2" height="15.0" fill="rgb(216,91,22)" rx="2" ry="2" />
+<text  x="1095.01" y="1663.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (4 samples, 0.23%)</title><rect x="1180.3" y="1941" width="2.8" height="15.0" fill="rgb(232,51,49)" rx="2" ry="2" />
+<text  x="1183.34" y="1951.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="929.8" y="1669" width="0.7" height="15.0" fill="rgb(222,90,8)" rx="2" ry="2" />
+<text  x="932.85" y="1679.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1525" width="0.7" height="15.0" fill="rgb(212,172,28)" rx="2" ry="2" />
+<text  x="1087.42" y="1535.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1445" width="0.7" height="15.0" fill="rgb(220,105,16)" rx="2" ry="2" />
+<text  x="1121.23" y="1455.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (15 samples, 0.88%)</title><rect x="1107.9" y="1797" width="10.3" height="15.0" fill="rgb(206,155,34)" rx="2" ry="2" />
+<text  x="1110.88" y="1807.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1089.9" y="1973" width="1.4" height="15.0" fill="rgb(243,204,17)" rx="2" ry="2" />
+<text  x="1092.94" y="1983.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (4 samples, 0.23%)</title><rect x="1133.4" y="485" width="2.8" height="15.0" fill="rgb(210,46,0)" rx="2" ry="2" />
+<text  x="1136.42" y="495.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1105.8" y="1397" width="1.4" height="15.0" fill="rgb(219,83,38)" rx="2" ry="2" />
+<text  x="1108.81" y="1407.5" ></text>
+</g>
+<g >
+<title>[ld-2.33.so] (1 samples, 0.06%)</title><rect x="1085.1" y="1973" width="0.7" height="15.0" fill="rgb(216,88,10)" rx="2" ry="2" />
+<text  x="1088.11" y="1983.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (945 samples, 55.26%)</title><rect x="429.6" y="1797" width="652.1" height="15.0" fill="rgb(236,163,41)" rx="2" ry="2" />
+<text  x="432.56" y="1807.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[unknown] (1 samples, 0.06%)</title><rect x="1187.2" y="1957" width="0.7" height="15.0" fill="rgb(243,145,45)" rx="2" ry="2" />
+<text  x="1190.24" y="1967.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1013" width="60.7" height="15.0" fill="rgb(254,172,34)" rx="2" ry="2" />
+<text  x="1121.92" y="1023.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1653" width="0.7" height="15.0" fill="rgb(250,220,46)" rx="2" ry="2" />
+<text  x="1087.42" y="1663.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="709" width="1.4" height="15.0" fill="rgb(226,216,18)" rx="2" ry="2" />
+<text  x="1121.92" y="719.5" ></text>
+</g>
+<g >
+<title>[unknown] (105 samples, 6.14%)</title><rect x="1107.2" y="1957" width="72.4" height="15.0" fill="rgb(206,175,9)" rx="2" ry="2" />
+<text  x="1110.19" y="1967.5" >[unknown]</text>
+</g>
+<g >
+<title>[libc-2.33.so] (6 samples, 0.35%)</title><rect x="1085.8" y="1973" width="4.1" height="15.0" fill="rgb(223,141,7)" rx="2" ry="2" />
+<text  x="1088.80" y="1983.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="533" width="2.1" height="15.0" fill="rgb(227,100,14)" rx="2" ry="2" />
+<text  x="1123.30" y="543.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1135.5" y="197" width="0.7" height="15.0" fill="rgb(205,74,12)" rx="2" ry="2" />
+<text  x="1138.49" y="207.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1253" width="60.7" height="15.0" fill="rgb(242,174,16)" rx="2" ry="2" />
+<text  x="1121.92" y="1263.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (268 samples, 15.67%)</title><rect x="887.8" y="1685" width="184.9" height="15.0" fill="rgb(249,120,50)" rx="2" ry="2" />
+<text  x="890.75" y="1695.5" >[perf_simple_query_flame..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1173" width="60.7" height="15.0" fill="rgb(245,164,1)" rx="2" ry="2" />
+<text  x="1121.92" y="1183.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1621" width="60.7" height="15.0" fill="rgb(224,224,35)" rx="2" ry="2" />
+<text  x="1121.92" y="1631.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1429" width="0.7" height="15.0" fill="rgb(240,22,16)" rx="2" ry="2" />
+<text  x="1121.23" y="1439.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1125.1" y="581" width="8.3" height="15.0" fill="rgb(237,118,45)" rx="2" ry="2" />
+<text  x="1128.13" y="591.5" ></text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1397" width="60.7" height="15.0" fill="rgb(249,97,12)" rx="2" ry="2" />
+<text  x="1121.92" y="1407.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1541" width="60.7" height="15.0" fill="rgb(250,189,30)" rx="2" ry="2" />
+<text  x="1121.92" y="1551.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1124.4" y="197" width="0.7" height="15.0" fill="rgb(237,103,41)" rx="2" ry="2" />
+<text  x="1127.44" y="207.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (7 samples, 0.41%)</title><rect x="1174.1" y="165" width="4.9" height="15.0" fill="rgb(233,62,28)" rx="2" ry="2" />
+<text  x="1177.13" y="175.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (8 samples, 0.47%)</title><rect x="1112.0" y="1733" width="5.5" height="15.0" fill="rgb(239,219,26)" rx="2" ry="2" />
+<text  x="1115.02" y="1743.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (14 samples, 0.82%)</title><rect x="1108.6" y="1781" width="9.6" height="15.0" fill="rgb(226,81,49)" rx="2" ry="2" />
+<text  x="1111.57" y="1791.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1134.1" y="373" width="2.1" height="15.0" fill="rgb(231,11,27)" rx="2" ry="2" />
+<text  x="1137.11" y="383.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1765" width="15.9" height="15.0" fill="rgb(223,120,22)" rx="2" ry="2" />
+<text  x="1094.32" y="1775.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1124.4" y="165" width="0.7" height="15.0" fill="rgb(237,0,48)" rx="2" ry="2" />
+<text  x="1127.44" y="175.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1123.8" y="229" width="1.3" height="15.0" fill="rgb(243,118,50)" rx="2" ry="2" />
+<text  x="1126.75" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1829" width="61.4" height="15.0" fill="rgb(241,193,53)" rx="2" ry="2" />
+<text  x="1121.23" y="1839.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1123.1" y="277" width="2.0" height="15.0" fill="rgb(246,154,26)" rx="2" ry="2" />
+<text  x="1126.06" y="287.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (5 samples, 0.29%)</title><rect x="1130.0" y="389" width="3.4" height="15.0" fill="rgb(224,218,42)" rx="2" ry="2" />
+<text  x="1132.96" y="399.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1653" width="0.7" height="15.0" fill="rgb(209,35,13)" rx="2" ry="2" />
+<text  x="1093.63" y="1663.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1125.1" y="517" width="8.3" height="15.0" fill="rgb(218,90,18)" rx="2" ry="2" />
+<text  x="1128.13" y="527.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1090.6" y="1685" width="0.7" height="15.0" fill="rgb(243,171,43)" rx="2" ry="2" />
+<text  x="1093.63" y="1695.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1083.7" y="1941" width="0.7" height="15.0" fill="rgb(251,87,21)" rx="2" ry="2" />
+<text  x="1086.73" y="1951.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="581" width="2.1" height="15.0" fill="rgb(241,87,43)" rx="2" ry="2" />
+<text  x="1123.30" y="591.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1717" width="15.9" height="15.0" fill="rgb(239,112,6)" rx="2" ry="2" />
+<text  x="1094.32" y="1727.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1115.5" y="1685" width="2.0" height="15.0" fill="rgb(240,103,44)" rx="2" ry="2" />
+<text  x="1118.47" y="1695.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (540 samples, 31.58%)</title><rect x="703.5" y="1733" width="372.6" height="15.0" fill="rgb(247,38,9)" rx="2" ry="2" />
+<text  x="706.51" y="1743.5" >[perf_simple_query_flame_dcd3199037457158f6e251623..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1134.1" y="341" width="2.1" height="15.0" fill="rgb(235,216,5)" rx="2" ry="2" />
+<text  x="1137.11" y="351.5" ></text>
+</g>
+<g >
+<title>all (1,710 samples, 100%)</title><rect x="10.0" y="2021" width="1180.0" height="15.0" fill="rgb(244,10,52)" rx="2" ry="2" />
+<text  x="13.00" y="2031.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (15 samples, 0.88%)</title><rect x="1096.8" y="1589" width="10.4" height="15.0" fill="rgb(235,7,49)" rx="2" ry="2" />
+<text  x="1099.84" y="1599.5" ></text>
+</g>
+<g >
+<title>perf_simple_que (1,710 samples, 100.00%)</title><rect x="10.0" y="2005" width="1180.0" height="15.0" fill="rgb(205,215,5)" rx="2" ry="2" />
+<text  x="13.00" y="2015.5" >perf_simple_que</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (62 samples, 3.63%)</title><rect x="1136.2" y="581" width="42.8" height="15.0" fill="rgb(254,221,41)" rx="2" ry="2" />
+<text  x="1139.18" y="591.5" >[per..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="535.1" y="1749" width="1.4" height="15.0" fill="rgb(227,75,36)" rx="2" ry="2" />
+<text  x="538.13" y="1759.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1105.1" y="1413" width="2.1" height="15.0" fill="rgb(253,61,22)" rx="2" ry="2" />
+<text  x="1108.12" y="1423.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="1089.9" y="1861" width="0.7" height="15.0" fill="rgb(213,206,6)" rx="2" ry="2" />
+<text  x="1092.94" y="1871.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1253" width="0.7" height="15.0" fill="rgb(238,121,3)" rx="2" ry="2" />
+<text  x="1121.23" y="1263.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (418 samples, 24.44%)</title><rect x="787.0" y="1717" width="288.5" height="15.0" fill="rgb(218,143,17)" rx="2" ry="2" />
+<text  x="790.01" y="1727.5" >[perf_simple_query_flame_dcd3199037457..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="1509" width="60.7" height="15.0" fill="rgb(242,31,46)" rx="2" ry="2" />
+<text  x="1121.92" y="1519.5" >[unkno..</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1089.9" y="1909" width="0.7" height="15.0" fill="rgb(228,19,36)" rx="2" ry="2" />
+<text  x="1092.94" y="1919.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1861" width="0.7" height="15.0" fill="rgb(232,153,5)" rx="2" ry="2" />
+<text  x="1087.42" y="1871.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1845" width="15.9" height="15.0" fill="rgb(206,43,15)" rx="2" ry="2" />
+<text  x="1094.32" y="1855.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (5 samples, 0.29%)</title><rect x="1086.5" y="1893" width="3.4" height="15.0" fill="rgb(225,18,0)" rx="2" ry="2" />
+<text  x="1089.49" y="1903.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (23 samples, 1.35%)</title><rect x="1091.3" y="1701" width="15.9" height="15.0" fill="rgb(221,135,38)" rx="2" ry="2" />
+<text  x="1094.32" y="1711.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1669" width="0.7" height="15.0" fill="rgb(230,154,18)" rx="2" ry="2" />
+<text  x="1087.42" y="1679.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="485" width="0.6" height="15.0" fill="rgb(235,145,7)" rx="2" ry="2" />
+<text  x="1181.96" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1717" width="61.4" height="15.0" fill="rgb(216,120,46)" rx="2" ry="2" />
+<text  x="1121.23" y="1727.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (89 samples, 5.20%)</title><rect x="1118.2" y="1861" width="61.4" height="15.0" fill="rgb(232,214,36)" rx="2" ry="2" />
+<text  x="1121.23" y="1871.5" >[unkno..</text>
+</g>
+<g >
+<title>[unknown] (88 samples, 5.15%)</title><rect x="1118.9" y="981" width="60.7" height="15.0" fill="rgb(207,49,51)" rx="2" ry="2" />
+<text  x="1121.92" y="991.5" >[unkno..</text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="1089.9" y="1957" width="0.7" height="15.0" fill="rgb(223,195,11)" rx="2" ry="2" />
+<text  x="1092.94" y="1967.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1084.4" y="1621" width="0.7" height="15.0" fill="rgb(251,127,52)" rx="2" ry="2" />
+<text  x="1087.42" y="1631.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (3 samples, 0.18%)</title><rect x="1120.3" y="517" width="2.1" height="15.0" fill="rgb(225,19,4)" rx="2" ry="2" />
+<text  x="1123.30" y="527.5" ></text>
+</g>
+<g >
+<title>std::__ostream_insert&lt;char, std::char_traits&lt;char&gt; &gt; (1 samples, 0.06%)</title><rect x="1187.2" y="1941" width="0.7" height="15.0" fill="rgb(248,12,15)" rx="2" ry="2" />
+<text  x="1190.24" y="1951.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (2 samples, 0.12%)</title><rect x="1118.9" y="661" width="1.4" height="15.0" fill="rgb(243,167,9)" rx="2" ry="2" />
+<text  x="1121.92" y="671.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1,176 samples, 68.77%)</title><rect x="270.8" y="1845" width="811.6" height="15.0" fill="rgb(245,153,4)" rx="2" ry="2" />
+<text  x="273.84" y="1855.5" >[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6]</text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (11 samples, 0.64%)</title><rect x="1065.1" y="1573" width="7.6" height="15.0" fill="rgb(218,18,3)" rx="2" ry="2" />
+<text  x="1068.10" y="1583.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1179.0" y="565" width="0.6" height="15.0" fill="rgb(249,110,11)" rx="2" ry="2" />
+<text  x="1181.96" y="575.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (12 samples, 0.70%)</title><rect x="1110.0" y="1765" width="8.2" height="15.0" fill="rgb(216,42,8)" rx="2" ry="2" />
+<text  x="1112.95" y="1775.5" ></text>
+</g>
+<g >
+<title>[libc-2.33.so] (1 samples, 0.06%)</title><rect x="1090.6" y="1909" width="0.7" height="15.0" fill="rgb(205,152,45)" rx="2" ry="2" />
+<text  x="1093.63" y="1919.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (1 samples, 0.06%)</title><rect x="1118.2" y="1301" width="0.7" height="15.0" fill="rgb(220,10,44)" rx="2" ry="2" />
+<text  x="1121.23" y="1311.5" ></text>
+</g>
+<g >
+<title>[perf_simple_query_flame_dcd3199037457158f6e2516231906d04f9637da6] (6 samples, 0.35%)</title><rect x="1085.8" y="1941" width="4.1" height="15.0" fill="rgb(218,159,5)" rx="2" ry="2" />
+<text  x="1088.80" y="1951.5" ></text>
+</g>
+</g>
+</svg>
