@@ -1,0 +1,1 @@
+{"tps": 22224.1, "allocs": 75.1, "tasks": 12.1, "instructions": 67806.0, "run_time": 50.56766104698181}
